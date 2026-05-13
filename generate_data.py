@@ -1,6 +1,8 @@
 import csv
 import random
 
+
+
 categories = {
     "Electronics": {
         "brands": ["Sony", "Samsung", "LG", "Apple", "Dell", "HP", "Bose", "Jabra", "Anker", "Lenovo", "Asus", "Acer"],
