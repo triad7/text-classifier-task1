@@ -1,67 +1,84 @@
 import torch
-import torch.nn as nn
 import joblib
 import time
+import logging
+from app.models import TextClassifier
+from app.config import settings
 
-# Load vectorizer
-vectorizer = joblib.load("app/model/vectorizer.pkl")
+logger = logging.getLogger(__name__)
 
-# Load label encoder
-label_encoder = joblib.load("app/model/label_encoder.pkl")
+# Global variables for loaded artifacts
+vectorizer = None
+label_encoder = None
+model = None
 
-# Neural Network
-class TextClassifier(nn.Module):
+def load_model_artifacts():
+    """
+    Safely load model artifacts from paths defined in settings.
+    Forces weights onto the CPU device to remain compatible with CPU containers.
+    """
+    global vectorizer, label_encoder, model
+    
+    # Avoid reloading if already loaded
+    if model is not None:
+        return
 
-    def __init__(self, input_size, num_classes):
-        super(TextClassifier, self).__init__()
+    try:
+        logger.info(f"Loading vectorizer from: {settings.VECTORIZER_PATH}")
+        vectorizer = joblib.load(settings.VECTORIZER_PATH)
 
-        self.fc1 = nn.Linear(input_size, 128)
+        logger.info(f"Loading label encoder from: {settings.LABEL_ENCODER_PATH}")
+        label_encoder = joblib.load(settings.LABEL_ENCODER_PATH)
 
-        self.relu = nn.ReLU()
+        input_size = len(vectorizer.get_feature_names_out())
+        num_classes = len(label_encoder.classes_)
 
-        self.fc2 = nn.Linear(128, num_classes)
+        logger.info("Initializing TextClassifier model structure")
+        model = TextClassifier(input_size, num_classes)
 
-    def forward(self, x):
+        logger.info(f"Loading model weights from: {settings.MODEL_PATH}")
+        # Use map_location='cpu' for cross-environment compatibility
+        state_dict = torch.load(settings.MODEL_PATH, map_location=torch.device("cpu"))
+        model.load_state_dict(state_dict)
+        model.eval()
 
-        x = self.fc1(x)
+        logger.info("Model artifacts loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load model artifacts: {str(e)}", exc_info=True)
+        raise RuntimeError(f"Model initialization failed: {str(e)}")
 
-        x = self.relu(x)
-
-        x = self.fc2(x)
-
-        return x
-
-# Load model
-input_size = len(vectorizer.get_feature_names_out())
-
-num_classes = len(label_encoder.classes_)
-
-model = TextClassifier(input_size, num_classes)
-
-model.load_state_dict(torch.load("app/model/model.pth"))
-
-model.eval()
+# Attempt eager load at import, but fallback gracefully if training hasn't occurred yet
+try:
+    load_model_artifacts()
+except Exception as e:
+    logger.warning(
+        f"Eager model load failed: {str(e)}. API will try loading again on first request."
+    )
 
 def predict_category(text: str):
+    """
+    Vectorizes input text and runs inference through PyTorch.
+    Returns category, confidence, and inference time.
+    """
+    # Ensure model is ready
+    if model is None:
+        load_model_artifacts()
 
     start = time.time()
 
+    # Preprocess text and vectorize
     text_vec = vectorizer.transform([text]).toarray()
-
-    text_tensor = torch.tensor(text_vec, dtype=torch.float32)
+    
+    # Zero-copy float tensor conversion
+    text_tensor = torch.from_numpy(text_vec).float()
 
     with torch.no_grad():
-
         outputs = model(text_tensor)
-
         probabilities = torch.softmax(outputs, dim=1)
-
         confidence, predicted = torch.max(probabilities, dim=1)
 
-    category = label_encoder.inverse_transform(
-        [predicted.item()]
-    )[0]
-
+    category = label_encoder.inverse_transform([predicted.item()])[0]
+    
     end = time.time()
 
     return {
